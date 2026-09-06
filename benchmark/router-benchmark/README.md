@@ -1,4 +1,4 @@
-# Kthena Router A/B Test Framework
+# Kthena Router Benchmark Framework
 
 A performance benchmarking framework for the Kthena Router based on the "sandwich model", using AIPerf as the load generator and Dynamo Mocker as the mock backend.
 
@@ -15,7 +15,7 @@ A performance benchmarking framework for the Kthena Router based on the "sandwic
 │  │ • QPS control│      │ • Routing        │      │ • TTFT simulation│   │
 │  │ • Concurrency│      │ • Conn. pooling  │      │ • TPOT simulation│   │
 │  │ • Arrival    │      │ • Load balancing │      │ • KV Cache sim.  │   │
-│  │   distribution     │ • Failover       │      │ • Prom. metrics  │   │
+│  │   distribution      │ • Failover       │      │ • Prom. metrics  │   │
 │  └──────────────┘      └──────────────────┘      └──────────────────┘   │
 │         │                      │                         │              │
 │         └──────────────────────┼─────────────────────────┘              │
@@ -33,54 +33,27 @@ A performance benchmarking framework for the Kthena Router based on the "sandwic
 | Dynamo Mocker | GPU-free, high-fidelity LLM inference simulation; supports vLLM/SGLang engine modes, KV cache simulation, prefix caching, and a configurable latency model |
 | K8s deployment | Reuses kthena's existing Helm charts and CRD definitions, consistent with the E2E test infrastructure |
 
-## Current Module Structure
-
-To make `ab_test` easier to review and to gradually align with the layered design in the proposal, the script is split into the following modules:
-
-```
-router-benchmark/
-├── scripts/
-│   ├── ab_test.py                         # CLI entrypoint
-│   └── router_bench/
-│       ├── __init__.py
-│       ├── models.py                      # ScenarioConfig / BenchmarkResult
-│       ├── kubernetes.py                  # K8sManager: apply, rollout, probe, port-forward
-│       ├── load_generator.py              # AIPerfRunner: scenario -> aiperf CLI
-│       ├── metrics_collector.py           # MetricsCollector: Prometheus / pprof collection
-│       ├── orchestrator.py                # ABTestOrchestrator: drives the A/B flow
-│       └── reporter.py                    # ResultReporter: compare / write / print report
-└── tests/
-    └── test_ab_test.py
-```
-
-### Module Responsibilities
-
-- `scripts/ab_test.py`
-  - Keeps the original entrypoint path so existing commands, docs, and tests stay valid
-  - Provides the CLI parser and `main()`
-- `scripts/router_bench/models.py`
-  - Benchmark domain models and scenario config loading
-  - `ScenarioConfig.metrics` defines whether Prometheus / pprof collection is enabled per scenario
-  - `BenchmarkResult.artifacts` holds additional collection results
-- `scripts/router_bench/kubernetes.py`
-  - Kubernetes resource operations, router rollout, service/debug port-forwarding, route ready probe
-- `scripts/router_bench/load_generator.py`
-  - Maps the scenario YAML to AIPerf CLI arguments
-- `scripts/router_bench/metrics_collector.py`
-  - Scrapes the router `/metrics` endpoint
-  - Fetches the router `/debug/pprof/profile` and other profiles
-  - Writes metrics and profile files to `artifacts/<config>/`
-- `scripts/router_bench/orchestrator.py`
-  - Drives the end-to-end A/B execution flow
-  - Triggers the Metrics Collector after each AIPerf run
-- `scripts/router_bench/reporter.py`
-  - Compares metrics, builds the report structure, writes JSON, prints the summary
-
 ## Quick Start
+
+The fastest path is a single make target, which handles cluster setup, dependency installation, and the A/B run:
+
+```bash
+make benchmark
+```
+
+Override the scenario or the two router configs via make variables:
+
+```bash
+make benchmark SCENARIO=smoke-test-s7 \
+  ROUTER_CONFIG_A=router-config-random \
+  ROUTER_CONFIG_B=router-config-least-latency
+```
+
+Individual steps are also exposed as `benchmark-setup`, `benchmark-deps`, `benchmark-run`, `benchmark-dry-run`, and `benchmark-cleanup`. Their manual equivalents are below.
 
 ### Prerequisites
 
-- Docker Desktop or Podman
+- Docker Desktop
 - Kind (Kubernetes in Docker)
 - Helm 3.x
 - kubectl
@@ -163,20 +136,20 @@ Results are written to the directory given by `--output`. Current outputs:
 
 ## Test Scenarios
 
-Eight scenarios are designed:
+Scenarios are framed in product terms first — each starts from a question a service owner would ask — then mapped to a concrete technical measurement. The scenario name (S1–S8) is the identifier passed to `SCENARIO=`.
 
-| # | Scenario | Goal | Key parameters |
-|---|----------|------|----------------|
-| S1 | Throughput Baseline | Maximum sustainable throughput | Gradually increasing QPS |
-| S2 | Latency vs QPS | Routing overhead under different loads | QPS: 10, 50, 100, 200, 500 |
-| S3 | Concurrency Scaling | Connection pool behavior | Connections: 10, 100, 500, 1000 |
-| S4 | Backend Count Impact | Scheduler scaling with pod count | Backends: 1, 4, 16, 32 |
-| S5 | Prompt Length Impact | Request-body parsing overhead | Prompt tokens: 100, 1000, 4000 |
-| S6 | Long Response | SSE relay overhead | Response tokens: 100, 1000, 4096 |
-| S7 | Backend Latency Variance | Scheduling with heterogeneous backends | 3 pods: TTFT 10/100/500ms |
-| S8 | Routing Strategy Comparison | Routing strategy overhead | random vs least-latency vs least-request |
+| # | Product question | Scenario | What it measures |
+|---|------------------|----------|------------------|
+| S1 | Does the service stay stable under a burst of high traffic? | Throughput Baseline | Peak sustainable throughput and success rate |
+| S2 | Do responses slow down as traffic grows? | Latency vs QPS | Routing latency overhead under load |
+| S3 | Does the service degrade when many users connect at once? | Concurrency Scaling | Behavior under many concurrent connections |
+| S4 | Does routing stay efficient as more backends come online? | Backend Count Impact | Scheduler cost as backend pod count grows |
+| S5 | Do long prompts (multi-turn chats, long documents) slow first-token response? | Prompt Length Impact | Request-parsing cost for long prompts |
+| S6 | Do long, streamed answers affect relay efficiency? | Long Response | Streaming relay cost for long outputs |
+| S7 | When backends vary in speed, does the router pick the right one? | Backend Latency Variance | Scheduling quality across heterogeneous backends |
+| S8 | Which routing strategy gives the best user experience? | Routing Strategy Comparison | End-to-end difference between routing strategies |
 
-## Tier 2: Combination Tests
+## Tier 2: Matrix Testing
 
 Tier 2 combination tests form an orthogonal matrix that isolates traffic conditions (P0), backend heterogeneity (P1), routing strategies (plugin chains), and system architecture from router performance. The matrix is 8 scenarios × 7 plugin chains = 56 sequential runs, using Prometheus-only measurement (no pprof per run; baseline smoke-test-s2 uses `pprof: true`).
 
@@ -238,7 +211,7 @@ python scripts/visualize_matrix.py \
   --output results/tier2/
 ```
 
-### Matrix Report Output Format
+### Matrix Report Output
 
 The report is a structured JSON at `<output_dir>/tier2_matrix_report.json` containing:
 
@@ -313,7 +286,7 @@ Generates four PNG charts visualizing the Tier 2 matrix results:
 
 ## References
 
-- [Kthena Router Benchmark Proposal](../../docs/proposal/kthena-router-benchmark.md)
+- [Kthena Router Benchmark Proposal](https://github.com/volcano-sh/kthena/pull/1284)
 - [AIPerf Documentation](https://github.com/ai-dynamo/aiperf)
 - [Dynamo Mocker Documentation](https://github.com/ai-dynamo/dynamo/blob/main/docs/mocker/mocker.md)
 - [Kthena Architecture](../../docs/kthena/docs/architecture/)
